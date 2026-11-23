@@ -1,0 +1,25 @@
+{
+  "id": "./",
+  "name": "EduEvent Scheduler",
+  "short_name": "EduEvent",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4F46E5",
+  "description": "Sistema de agendamento de eventos escolares.",
+  "icons": [
+    {
+      "src": "./icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

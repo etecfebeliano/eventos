@@ -14,16 +14,17 @@ if (config.apiKey && config.projectId) {
   const messaging = firebase.messaging();
 
   messaging.onBackgroundMessage((payload) => {
-    console.log('[firebase-messaging-sw.js] Received background message ', payload);
-    
-    const notificationTitle = payload.notification.title;
+    const notification = (payload && payload.notification) || {};
+    const data = (payload && payload.data) || {};
+    const notificationTitle = notification.title || data.title || 'EduEvent';
+    const defaultIconUrl = new URL('./icon-192x192.png', (self.registration && self.registration.scope) || self.location.href).href;
     const notificationOptions = {
-      body: payload.notification.body,
-      icon: payload.notification.icon || '/icon-192x192.png',
-      data: payload.data
+      body: notification.body || data.body || '',
+      icon: notification.icon || defaultIconUrl,
+      data
     };
 
-    self.registration.showNotification(notificationTitle, notificationOptions);
+    return self.registration.showNotification(notificationTitle, notificationOptions);
   });
 } else {
   console.warn('[firebase-messaging-sw.js] Firebase config not provided in URL search params.');
