@@ -1,0 +1,1121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Top-level Default-Deny Catch-All Gate
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- AUTH & VALIDATION HELPERS ---
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function hasVerifiedEmail() {
+      return isSignedIn() &&
+        request.auth.token.email is string &&
+        request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 160 &&
+        id.matches('^[a-zA-Z0-9_@.+=-]+$') &&
+        !id.matches('.*\\.\\..*');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (hasVerifiedEmail() && request.auth.token.email.lower() == 'faehlrc@gmail.com') ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
+    function isStaff() {
+      return isSignedIn() && (
+        (hasVerifiedEmail() && request.auth.token.email.lower() == 'faehlrc@gmail.com') ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'coordinator']
+        )
+      );
+    }
+
+    function isValidUserPayload(data, userId) {
+      return data.keys().hasAll(['email', 'role']) &&
+        data.keys().hasOnly([
+          'uid', 'email', 'name', 'rm', 'courseId', 'classId',
+          'role', 'isOnboarded', 'blocked', 'bypassPreReg',
+          'updatedBy', 'updatedByName', 'updatedAt', 'needsUidLink', 'pushTokens'
+        ]) &&
+        (!('uid' in data) || (data.uid is string && data.uid == userId)) &&
+        data.email is string && data.email.size() <= 254 &&
+        data.role in ['admin', 'coordinator', 'user'] &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 200)) &&
+        (!('rm' in data) || (data.rm is string && data.rm.size() <= 64)) &&
+        (!('courseId' in data) || (data.courseId is string && data.courseId.size() <= 120)) &&
+        (!('classId' in data) || (data.classId is string && data.classId.size() <= 120)) &&
+        (!('isOnboarded' in data) || data.isOnboarded is bool) &&
+        (!('blocked' in data) || data.blocked is bool) &&
+        (!('bypassPreReg' in data) || data.bypassPreReg is bool) &&
+        (!('needsUidLink' in data) || data.needsUidLink is bool) &&
+        (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 160)) &&
+        (!('updatedByName' in data) || (data.updatedByName is string && data.updatedByName.size() <= 200)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64)) &&
+        (!('pushTokens' in data) || (data.pushTokens is list && data.pushTokens.size() <= 20));
+    }
+
+    function isValidSessionCounter(data) {
+      return data.keys().hasAll(['eventId', 'sessionId', 'filled', 'capacity']) &&
+        data.keys().hasOnly(['eventId', 'sessionId', 'filled', 'capacity']) &&
+        data.eventId is string && data.eventId.size() <= 160 &&
+        data.sessionId is string && data.sessionId.size() <= 160 &&
+        data.filled is int && data.filled >= 0 &&
+        data.capacity is int && data.capacity >= 0;
+    }
+
+    function isValidEnrollmentPayload(data, enrollmentId) {
+      return data.keys().hasAll(['id', 'userId', 'eventId', 'sessionId', 'status', 'attended']) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'eventId', 'sessionId', 'teamId', 'status', 'enrolledAt',
+          'attended', 'checkInAt', 'checkInTokenUsed', 'updatedBy', 'updatedByName', 'updatedAt',
+          'userName', 'userEmail', 'userRm', 'userCourseId', 'userClassId',
+          'eventName', 'eventLocation', 'sessionName', 'sessionDate',
+          'sessionStartTime', 'sessionEndTime', 'teamName', 'teamCode', 'isCaptain',
+          'manualEnrollment', 'enrolledByManagerId', 'enrolledByManagerName'
+        ]) &&
+        data.id is string && data.id == enrollmentId &&
+        data.userId is string && data.userId.size() <= 160 &&
+        data.eventId is string && data.eventId.size() <= 160 &&
+        data.sessionId is string && data.sessionId.size() <= 160 &&
+        data.status in ['confirmed', 'canceled', 'waitlist'] &&
+        data.attended is bool &&
+        (!('teamId' in data) || data.teamId == null || (data.teamId is string && data.teamId.size() <= 160)) &&
+        (!('checkInTokenUsed' in data) || (data.checkInTokenUsed is string && data.checkInTokenUsed.size() <= 32)) &&
+        (!('userName' in data) || (data.userName is string && data.userName.size() <= 200)) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 254)) &&
+        (!('userRm' in data) || (data.userRm is string && data.userRm.size() <= 64));
+    }
+
+    function isSafeHttpUrl(url) {
+      return url is string &&
+        url.size() >= 8 &&
+        url.size() <= 1000 &&
+        url.matches('^https?://[^\\s<>"]+$');
+    }
+
+    function isValidDeliverable(item) {
+      return item is map &&
+        item.keys().hasAll(['id', 'type', 'label', 'url']) &&
+        item.keys().hasOnly(['id', 'type', 'label', 'url']) &&
+        item.id is string && item.id.size() >= 1 && item.id.size() <= 160 &&
+        item.type in ['github', 'figma', 'youtube', 'pdf', 'demo', 'other'] &&
+        item.label is string && item.label.size() <= 200 &&
+        isSafeHttpUrl(item.url);
+    }
+
+    function isValidSubmissionPayload(sub) {
+      return sub is map &&
+        sub.keys().hasAll(['projectTitle', 'deliverables', 'submittedAt', 'submittedBy']) &&
+        sub.keys().hasOnly([
+          'projectTitle', 'projectDescription', 'deliverables',
+          'submittedAt', 'submittedBy', 'submittedByName'
+        ]) &&
+        sub.projectTitle is string && sub.projectTitle.size() >= 1 && sub.projectTitle.size() <= 200 &&
+        (!('projectDescription' in sub) || (sub.projectDescription is string && sub.projectDescription.size() <= 2000)) &&
+        sub.submittedAt is string && sub.submittedAt.size() <= 64 &&
+        sub.submittedBy is string && sub.submittedBy.size() <= 160 &&
+        (!('submittedByName' in sub) || (sub.submittedByName is string && sub.submittedByName.size() <= 200)) &&
+        sub.deliverables is list &&
+        sub.deliverables.size() <= 15 &&
+        (sub.deliverables.size() < 1 || isValidDeliverable(sub.deliverables[0])) &&
+        (sub.deliverables.size() < 2 || isValidDeliverable(sub.deliverables[1])) &&
+        (sub.deliverables.size() < 3 || isValidDeliverable(sub.deliverables[2])) &&
+        (sub.deliverables.size() < 4 || isValidDeliverable(sub.deliverables[3])) &&
+        (sub.deliverables.size() < 5 || isValidDeliverable(sub.deliverables[4])) &&
+        (sub.deliverables.size() < 6 || isValidDeliverable(sub.deliverables[5])) &&
+        (sub.deliverables.size() < 7 || isValidDeliverable(sub.deliverables[6])) &&
+        (sub.deliverables.size() < 8 || isValidDeliverable(sub.deliverables[7])) &&
+        (sub.deliverables.size() < 9 || isValidDeliverable(sub.deliverables[8])) &&
+        (sub.deliverables.size() < 10 || isValidDeliverable(sub.deliverables[9])) &&
+        (sub.deliverables.size() < 11 || isValidDeliverable(sub.deliverables[10])) &&
+        (sub.deliverables.size() < 12 || isValidDeliverable(sub.deliverables[11])) &&
+        (sub.deliverables.size() < 13 || isValidDeliverable(sub.deliverables[12])) &&
+        (sub.deliverables.size() < 14 || isValidDeliverable(sub.deliverables[13])) &&
+        (sub.deliverables.size() < 15 || isValidDeliverable(sub.deliverables[14]));
+    }
+
+    function isValidTeamPayload(data, teamId) {
+      return data.keys().hasAll(['id', 'eventId', 'sessionId', 'name', 'code', 'captainId', 'members']) &&
+        data.keys().hasOnly([
+          'id', 'eventId', 'sessionId', 'name', 'code', 'captainId', 'captainName', 'captainRm',
+          'members', 'membersData', 'createdAt', 'submission', 'period'
+        ]) &&
+        data.id is string && data.id == teamId &&
+        data.eventId is string && data.eventId.size() <= 160 &&
+        data.sessionId is string && data.sessionId.size() <= 160 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 32 &&
+        data.captainId is string && data.captainId.size() <= 160 &&
+        data.members is list && data.members.size() >= 1 && data.members.size() <= 30 &&
+        (!('membersData' in data) || (data.membersData is list && data.membersData.size() <= 30)) &&
+        (!('captainName' in data) || (data.captainName is string && data.captainName.size() <= 200)) &&
+        (!('captainRm' in data) || data.captainRm == null || (data.captainRm is string && data.captainRm.size() <= 64)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+        (!('submission' in data) || isValidSubmissionPayload(data.submission)) &&
+        (!('period' in data) || data.period in ['matutino', 'vespertino', 'noturno', 'integral']);
+    }
+
+    function isValidEvaluationTeamPayload(data, teamId) {
+      return data.keys().hasAll(['id', 'eventId', 'sessionId', 'name']) &&
+        data.keys().hasOnly([
+          'id', 'eventId', 'sessionId', 'name', 'captainName',
+          'captainClassName', 'classLabel', 'period', 'submission',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id == teamId &&
+        isValidId(data.eventId) &&
+        isValidId(data.sessionId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        (!('captainName' in data) || (data.captainName is string && data.captainName.size() <= 200)) &&
+        (!('captainClassName' in data) || (data.captainClassName is string && data.captainClassName.size() <= 200)) &&
+        (!('classLabel' in data) || (data.classLabel is string && data.classLabel.size() <= 200)) &&
+        (!('period' in data) || data.period in ['matutino', 'vespertino', 'noturno', 'integral']) &&
+        (!('submission' in data) || isValidSubmissionPayload(data.submission)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidEvaluationPayload(data, evaluationId) {
+      return data.keys().hasAll(['eventId', 'teamId', 'judgeId', 'judgeName', 'scores', 'totalScore', 'invalidated']) &&
+        data.keys().hasOnly([
+          'id', 'eventId', 'teamId', 'judgeId', 'judgeName',
+          'judgeToken', 'pinVerification', 'scores', 'feedback',
+          'totalScore', 'invalidated', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.eventId) &&
+        isValidId(data.teamId) &&
+        isValidId(data.judgeId) &&
+        evaluationId == (data.eventId + '_' + data.teamId + '_' + data.judgeId) &&
+        data.judgeName is string && data.judgeName.size() >= 1 && data.judgeName.size() <= 200 &&
+        data.scores is map && data.scores.size() >= 1 && data.scores.size() <= 50 &&
+        data.totalScore is number && data.totalScore >= 0 && data.totalScore <= 1000 &&
+        data.invalidated is bool &&
+        (!('id' in data) || data.id == evaluationId) &&
+        (!('judgeToken' in data) || (data.judgeToken is string && data.judgeToken.size() <= 160)) &&
+        (!('pinVerification' in data) || (data.pinVerification is string && data.pinVerification.size() <= 160)) &&
+        (!('feedback' in data) || (
+          data.feedback is map &&
+          data.feedback.keys().hasOnly(['strengths', 'suggestions']) &&
+          (!('strengths' in data.feedback) || (data.feedback.strengths is string && data.feedback.strengths.size() <= 2000)) &&
+          (!('suggestions' in data.feedback) || (data.feedback.suggestions is string && data.feedback.suggestions.size() <= 2000))
+        )) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function evalTeamMatchesEvent(teamId, eventId) {
+      return (
+        exists(/databases/$(database)/documents/evaluation_teams/$(teamId)) &&
+        get(/databases/$(database)/documents/evaluation_teams/$(teamId)).data.eventId == eventId
+      ) || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/teams/$(teamId)) &&
+        get(/databases/$(database)/documents/teams/$(teamId)).data.eventId == eventId
+      );
+    }
+
+    function isJudgeProofValidForScope(data, scopeEventId) {
+      return (
+        (
+          ('judgeToken' in data) &&
+          data.judgeToken is string &&
+          isValidId(data.judgeToken) &&
+          data.judgeId == data.judgeToken &&
+          exists(/databases/$(database)/documents/judge_tokens/$(data.judgeToken)) &&
+          get(/databases/$(database)/documents/judge_tokens/$(data.judgeToken)).data.eventId == scopeEventId
+        ) || (
+          ('pinVerification' in data) &&
+          data.pinVerification is string &&
+          isValidId(data.pinVerification) &&
+          data.judgeId.matches('^pin_[a-zA-Z0-9_]{8,64}$') &&
+          exists(/databases/$(database)/documents/evaluation_pin_proofs/$(scopeEventId + '_' + data.pinVerification))
+        ) || (
+          isSignedIn() &&
+          data.judgeId == request.auth.uid &&
+          exists(/databases/$(database)/documents/teams/$(data.teamId)) &&
+          !get(/databases/$(database)/documents/teams/$(data.teamId)).data.members.hasAny([request.auth.uid]) &&
+          get(/databases/$(database)/documents/events/$(scopeEventId)).data.get('evaluationConfig', {}).get('hasPin', false) == false
+        )
+      );
+    }
+
+    function isAuthorizedJudgeMutation(data) {
+      return evalTeamMatchesEvent(data.teamId, data.eventId) &&
+        exists(/databases/$(database)/documents/events/$(data.eventId)) && (
+          (
+            get(/databases/$(database)/documents/events/$(data.eventId)).data.get('evaluationConfig', {}).get('isOpen', false) == true &&
+            isJudgeProofValidForScope(data, data.eventId)
+          ) || (
+            get(/databases/$(database)/documents/events/$(data.eventId)).data.get('parentId', '') != '' &&
+            exists(/databases/$(database)/documents/events/$(get(/databases/$(database)/documents/events/$(data.eventId)).data.parentId)) &&
+            get(/databases/$(database)/documents/events/$(get(/databases/$(database)/documents/events/$(data.eventId)).data.parentId)).data.get('evaluationConfig', {}).get('isOpen', false) == true &&
+            get(/databases/$(database)/documents/events/$(get(/databases/$(database)/documents/events/$(data.eventId)).data.parentId)).data.get('evaluationConfig', {}).get('centralizeSubEvents', false) == true &&
+            isJudgeProofValidForScope(data, get(/databases/$(database)/documents/events/$(data.eventId)).data.parentId)
+          )
+        );
+    }
+
+    function isValidJudgeEvaluationRead(data, evaluationId) {
+      return evaluationId == (data.eventId + '_' + data.teamId + '_' + data.judgeId) && (
+        (
+          ('judgeToken' in data) &&
+          data.judgeToken is string &&
+          isValidId(data.judgeToken) &&
+          data.judgeId == data.judgeToken &&
+          exists(/databases/$(database)/documents/judge_tokens/$(data.judgeToken))
+        ) || (
+          ('pinVerification' in data) &&
+          data.pinVerification is string &&
+          data.judgeId.matches('^pin_[a-zA-Z0-9_]{8,64}$')
+        ) || (
+          isSignedIn() &&
+          data.judgeId == request.auth.uid
+        )
+      );
+    }
+
+    function isValidNotificationPayload(data) {
+      return data.keys().hasAll(['userId', 'title', 'message', 'read', 'type', 'createdAt']) &&
+        data.keys().hasOnly(['userId', 'title', 'message', 'read', 'type', 'createdAt', 'link', 'teamId']) &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 160 &&
+        data.title is string && data.title.size() <= 200 &&
+        data.message is string && data.message.size() <= 1000 &&
+        data.read is bool &&
+        data.type in ['info', 'success', 'warning', 'reminder'] &&
+        data.createdAt is string && data.createdAt.size() <= 64 &&
+        (!('link' in data) || (data.link is string && data.link.size() <= 300)) &&
+        (!('teamId' in data) || (data.teamId is string && data.teamId.size() <= 160));
+    }
+
+    function isValidTeamFeedbackPayload(data, feedbackId) {
+      return data.keys().hasAll(['id', 'eventId', 'teamId', 'judgeName', 'scores', 'totalScore', 'invalidated']) &&
+        data.keys().hasOnly([
+          'id', 'eventId', 'teamId', 'judgeName', 'scores', 'feedback',
+          'totalScore', 'invalidated', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.eventId) &&
+        isValidId(data.teamId) &&
+        data.id == feedbackId &&
+        data.judgeName is string && data.judgeName.size() >= 1 && data.judgeName.size() <= 200 &&
+        data.scores is map && data.scores.size() >= 1 && data.scores.size() <= 50 &&
+        data.totalScore is number && data.totalScore >= 0 && data.totalScore <= 1000 &&
+        data.invalidated is bool &&
+        (!('feedback' in data) || (
+          data.feedback is map &&
+          data.feedback.keys().hasOnly(['strengths', 'suggestions']) &&
+          (!('strengths' in data.feedback) || (data.feedback.strengths is string && data.feedback.strengths.size() <= 2000)) &&
+          (!('suggestions' in data.feedback) || (data.feedback.suggestions is string && data.feedback.suggestions.size() <= 2000))
+        )) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isEventParticipantViewEnabled(eventId) {
+      return exists(/databases/$(database)/documents/events/$(eventId)) && (
+        get(/databases/$(database)/documents/events/$(eventId)).data.get('evaluationConfig', {}).get('allowParticipantView', false) == true ||
+        (
+          get(/databases/$(database)/documents/events/$(eventId)).data.get('parentId', '') != '' &&
+          exists(/databases/$(database)/documents/events/$(get(/databases/$(database)/documents/events/$(eventId)).data.parentId)) &&
+          get(/databases/$(database)/documents/events/$(get(/databases/$(database)/documents/events/$(eventId)).data.parentId)).data.get('evaluationConfig', {}).get('centralizeSubEvents', false) == true &&
+          get(/databases/$(database)/documents/events/$(get(/databases/$(database)/documents/events/$(eventId)).data.parentId)).data.get('evaluationConfig', {}).get('allowParticipantView', false) == true
+        )
+      );
+    }
+
+    function isTeamMemberWithVisibleFeedback(data) {
+      return isSignedIn() &&
+        data != null &&
+        data.invalidated == false &&
+        exists(/databases/$(database)/documents/teams/$(data.teamId)) &&
+        get(/databases/$(database)/documents/teams/$(data.teamId)).data.members.hasAny([request.auth.uid]) &&
+        isEventParticipantViewEnabled(data.eventId);
+    }
+
+    function isValidAccessRequestPayload(data, requestId) {
+      return data.keys().hasAll(['id', 'uid', 'email', 'name', 'rm', 'type', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'uid', 'email', 'name', 'rm', 'type', 'status',
+          'createdAt', 'updatedAt', 'resolvedBy', 'resolvedAt'
+        ]) &&
+        data.id is string && data.id == requestId &&
+        data.uid is string && data.uid == requestId &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 200 &&
+        data.rm is string && data.rm.size() >= 1 && data.rm.size() <= 64 &&
+        data.type in ['invalid_rm', 'visitor_request'] &&
+        data.status in ['pending', 'resolved'] &&
+        data.createdAt is string && data.createdAt.size() <= 64 &&
+        data.updatedAt is string && data.updatedAt.size() <= 64 &&
+        (!('resolvedBy' in data) || (data.resolvedBy is string && data.resolvedBy.size() <= 160)) &&
+        (!('resolvedAt' in data) || (data.resolvedAt is string && data.resolvedAt.size() <= 64));
+    }
+
+    function isValidAuditLogPayload(data) {
+      return data.keys().hasAll(['userId', 'userName', 'userEmail', 'action', 'resourceType', 'timestamp']) &&
+        data.keys().hasOnly([
+          'userId', 'userName', 'userEmail', 'action',
+          'resourceType', 'resourceId', 'resourceName', 'details', 'timestamp'
+        ]) &&
+        data.userId is string && data.userId.size() <= 160 &&
+        data.action is string && data.action.size() <= 300 &&
+        data.resourceType in ['event', 'certificate', 'user_role', 'pre_student', 'config', 'system', 'enrollment'] &&
+        data.timestamp is string && data.timestamp.size() <= 64;
+    }
+
+    function isOwnPendingMerge(userId) {
+      return hasVerifiedEmail() &&
+        exists(/databases/$(database)/documents/users/$('provisioned_' + request.auth.token.email.lower())) &&
+        !existsAfter(/databases/$(database)/documents/users/$('provisioned_' + request.auth.token.email.lower())) &&
+        get(/databases/$(database)/documents/users/$('provisioned_' + request.auth.token.email.lower())).data.get('needsUidLink', false) == true &&
+        get(/databases/$(database)/documents/users/$('provisioned_' + request.auth.token.email.lower())).data.email.lower() == request.auth.token.email.lower() &&
+        incoming().email.lower() == request.auth.token.email.lower() &&
+        incoming().role == get(/databases/$(database)/documents/users/$('provisioned_' + request.auth.token.email.lower())).data.role &&
+        incoming().get('blocked', false) == get(/databases/$(database)/documents/users/$('provisioned_' + request.auth.token.email.lower())).data.get('blocked', false) &&
+        incoming().get('needsUidLink', false) == false &&
+        userId == request.auth.uid;
+    }
+
+    function isMergingProvisionedUser(tempUid) {
+      return hasVerifiedEmail() &&
+        tempUid == ('provisioned_' + request.auth.token.email.lower()) &&
+        exists(/databases/$(database)/documents/users/$(tempUid)) &&
+        !existsAfter(/databases/$(database)/documents/users/$(tempUid)) &&
+        get(/databases/$(database)/documents/users/$(tempUid)).data.get('needsUidLink', false) == true &&
+        existsAfter(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isStudentCounterIncrementValid(eventId, sessionId) {
+      return (
+        (
+          (!exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) ||
+           get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.status != 'confirmed') &&
+          existsAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+          getAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId == sessionId &&
+          getAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.status == 'confirmed'
+        ) ||
+        (
+          !exists(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId)) &&
+          existsAfter(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId)) &&
+          getAfter(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId)).data.sessionId == sessionId &&
+          getAfter(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId)).data.status == 'confirmed'
+        ) ||
+        (
+          exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+          existsAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+          get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId != sessionId &&
+          getAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId == sessionId
+        )
+      );
+    }
+
+    function isStudentCounterDecrementValid(eventId, sessionId) {
+      return (
+        (
+          exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+          get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId == sessionId &&
+          !existsAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId))
+        ) ||
+        (
+          exists(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId)) &&
+          get(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId)).data.sessionId == sessionId &&
+          !existsAfter(/databases/$(database)/documents/enrollments/$('enr_' + request.auth.uid + '_' + eventId + '_' + sessionId))
+        ) ||
+        (
+          exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+          existsAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+          get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId == sessionId &&
+          getAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId != sessionId
+        )
+      );
+    }
+
+    function isValidStudentSessionSlotChange(oldS, newS) {
+      return oldS is map && newS is map &&
+        newS.diff(oldS).affectedKeys().hasOnly(['filled']) &&
+        newS.filled is int &&
+        newS.filled >= 0 &&
+        (
+          newS.filled == oldS.filled ||
+          newS.filled == oldS.filled - 1 ||
+          (newS.filled == oldS.filled + 1 && newS.filled <= oldS.capacity)
+        );
+    }
+
+    function isValidStudentSessionsList(oldList, newList) {
+      return oldList is list &&
+        newList is list &&
+        newList.size() == oldList.size() &&
+        newList.size() >= 1 &&
+        newList.size() <= 30 &&
+        (newList.size() < 1 || isValidStudentSessionSlotChange(oldList[0], newList[0])) &&
+        (newList.size() < 2 || isValidStudentSessionSlotChange(oldList[1], newList[1])) &&
+        (newList.size() < 3 || isValidStudentSessionSlotChange(oldList[2], newList[2])) &&
+        (newList.size() < 4 || isValidStudentSessionSlotChange(oldList[3], newList[3])) &&
+        (newList.size() < 5 || isValidStudentSessionSlotChange(oldList[4], newList[4])) &&
+        (newList.size() < 6 || isValidStudentSessionSlotChange(oldList[5], newList[5])) &&
+        (newList.size() < 7 || isValidStudentSessionSlotChange(oldList[6], newList[6])) &&
+        (newList.size() < 8 || isValidStudentSessionSlotChange(oldList[7], newList[7])) &&
+        (newList.size() < 9 || isValidStudentSessionSlotChange(oldList[8], newList[8])) &&
+        (newList.size() < 10 || isValidStudentSessionSlotChange(oldList[9], newList[9])) &&
+        (newList.size() < 11 || isValidStudentSessionSlotChange(oldList[10], newList[10])) &&
+        (newList.size() < 12 || isValidStudentSessionSlotChange(oldList[11], newList[11])) &&
+        (newList.size() < 13 || isValidStudentSessionSlotChange(oldList[12], newList[12])) &&
+        (newList.size() < 14 || isValidStudentSessionSlotChange(oldList[13], newList[13])) &&
+        (newList.size() < 15 || isValidStudentSessionSlotChange(oldList[14], newList[14])) &&
+        (newList.size() < 16 || isValidStudentSessionSlotChange(oldList[15], newList[15])) &&
+        (newList.size() < 17 || isValidStudentSessionSlotChange(oldList[16], newList[16])) &&
+        (newList.size() < 18 || isValidStudentSessionSlotChange(oldList[17], newList[17])) &&
+        (newList.size() < 19 || isValidStudentSessionSlotChange(oldList[18], newList[18])) &&
+        (newList.size() < 20 || isValidStudentSessionSlotChange(oldList[19], newList[19])) &&
+        (newList.size() < 21 || isValidStudentSessionSlotChange(oldList[20], newList[20])) &&
+        (newList.size() < 22 || isValidStudentSessionSlotChange(oldList[21], newList[21])) &&
+        (newList.size() < 23 || isValidStudentSessionSlotChange(oldList[22], newList[22])) &&
+        (newList.size() < 24 || isValidStudentSessionSlotChange(oldList[23], newList[23])) &&
+        (newList.size() < 25 || isValidStudentSessionSlotChange(oldList[24], newList[24])) &&
+        (newList.size() < 26 || isValidStudentSessionSlotChange(oldList[25], newList[25])) &&
+        (newList.size() < 27 || isValidStudentSessionSlotChange(oldList[26], newList[26])) &&
+        (newList.size() < 28 || isValidStudentSessionSlotChange(oldList[27], newList[27])) &&
+        (newList.size() < 29 || isValidStudentSessionSlotChange(oldList[28], newList[28])) &&
+        (newList.size() < 30 || isValidStudentSessionSlotChange(oldList[29], newList[29]));
+    }
+
+    function isStudentEventSessionUpdateValid(eventId) {
+      return isSignedIn() &&
+        existing().get('registrationLocked', false) != true &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['sessions']) &&
+        isValidStudentSessionsList(existing().sessions, incoming().sessions) &&
+        (
+          existing().get('allowMultipleSessions', false) == true ||
+          (
+            existsAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+            getAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.status == 'confirmed' &&
+            (
+              !exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) ||
+              get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.status != 'confirmed' ||
+              get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId != getAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)).data.sessionId
+            )
+          ) ||
+          (
+            exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId)) &&
+            !existsAfter(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + eventId))
+          )
+        );
+    }
+
+    // --- COLLECTIONS ---
+
+    // USERS: Profile collection protecting student PII and preventing role escalation
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (
+        request.auth.uid == userId ||
+        isStaff() ||
+        (
+          hasVerifiedEmail() &&
+          userId == ('provisioned_' + request.auth.token.email.lower())
+        )
+      );
+
+      allow list: if isStaff() || (
+        hasVerifiedEmail() &&
+        resource != null &&
+        existing().get('needsUidLink', false) == true &&
+        existing().email.lower() == request.auth.token.email.lower()
+      );
+
+      allow create: if isValidId(userId) &&
+        incoming().keys().hasAll(['uid', 'email', 'role']) &&
+        incoming().uid == userId &&
+        isValidUserPayload(incoming(), userId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          request.auth.uid == userId &&
+          (
+            (
+              incoming().role == 'user' &&
+              incoming().get('bypassPreReg', false) == false &&
+              incoming().get('needsUidLink', false) == false &&
+              incoming().get('updatedBy', '') != 'system_merge'
+            ) ||
+            (
+              incoming().get('updatedBy', '') == 'system_merge' &&
+              isOwnPendingMerge(userId)
+            )
+          )
+        )
+      );
+
+      allow update: if isValidId(userId) && isValidUserPayload(incoming(), userId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          request.auth.uid == userId && (
+            (
+              incoming().role == existing().role &&
+              (
+                incoming().get('blocked', false) == existing().get('blocked', false) ||
+                (existing().get('blocked', false) == false && incoming().get('blocked', false) == true)
+              ) &&
+              incoming().get('bypassPreReg', false) == existing().get('bypassPreReg', false) &&
+              incoming().get('needsUidLink', false) == existing().get('needsUidLink', false)
+            ) ||
+            (
+              incoming().get('updatedBy', '') == 'system_merge' &&
+              isOwnPendingMerge(userId)
+            )
+          )
+        )
+      );
+
+      allow delete: if isValidId(userId) && (
+        isAdmin() ||
+        (
+          hasVerifiedEmail() &&
+          existing().get('needsUidLink', false) == true &&
+          existing().email.lower() == request.auth.token.email.lower() &&
+          userId == ('provisioned_' + request.auth.token.email.lower())
+        )
+      );
+    }
+
+    // ACADEMIC METADATA
+    match /courses/{courseId} {
+      allow get: if isValidId(courseId);
+      allow list: if true;
+      allow write: if isAdmin() && isValidId(courseId);
+    }
+
+    match /classes/{classId} {
+      allow get: if isValidId(classId);
+      allow list: if true;
+      allow write: if isAdmin() && isValidId(classId);
+    }
+
+    // TEMPLATE CONFIGURATIONS
+    match /config/certificate {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /config/system {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // PRE-STUDENTS
+    match /preStudents/{rm} {
+      allow get: if isSignedIn() && isValidId(rm);
+      allow list: if isStaff();
+      allow write: if isAdmin() && isValidId(rm);
+    }
+
+    // EVENTS: Staff full control; signed-in students/captains may only perform bounded atomic session occupancy updates
+    match /events/{eventId} {
+      allow get: if isValidId(eventId);
+      allow list: if true;
+      allow create, delete: if isStaff() && isValidId(eventId);
+      allow update: if isValidId(eventId) && (
+        isStaff() ||
+        isStudentEventSessionUpdateValid(eventId)
+      );
+    }
+
+    // SESSION COUNTERS: Isolated atomic occupancy tracking (+1 / -1)
+    match /session_counters/{counterId} {
+      allow get: if isValidId(counterId);
+      allow list: if true;
+      allow create, delete: if isStaff() && isValidId(counterId);
+      allow update: if isValidId(counterId) && isValidSessionCounter(incoming()) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          counterId == (existing().eventId + '_' + existing().sessionId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['filled']) &&
+          incoming().eventId == existing().eventId &&
+          incoming().sessionId == existing().sessionId &&
+          incoming().capacity == existing().capacity &&
+          incoming().filled >= 0 &&
+          incoming().filled <= existing().capacity &&
+          exists(/databases/$(database)/documents/events/$(existing().eventId)) &&
+          get(/databases/$(database)/documents/events/$(existing().eventId)).data.get('registrationLocked', false) != true &&
+          (
+            (
+              incoming().filled == existing().filled + 1 &&
+              isStudentCounterIncrementValid(existing().eventId, existing().sessionId)
+            ) ||
+            (
+              incoming().filled == existing().filled - 1 &&
+              isStudentCounterDecrementValid(existing().eventId, existing().sessionId)
+            )
+          )
+        )
+      );
+    }
+
+    // CHECK-IN TOTP SEEDS: Staff-only
+    match /event_checkin_secrets/{eventId} {
+      allow get: if isStaff() && isValidId(eventId);
+      allow list: if isStaff();
+      allow write: if isStaff() && isValidId(eventId);
+    }
+
+    // EPHEMERAL CHECK-IN WINDOW TOKENS: Staff-only direct access (students validate via exists/get in enrollments)
+    match /checkin_tokens/{tokenId} {
+      allow get: if isStaff() && isValidId(tokenId);
+      allow list: if isStaff();
+      allow write: if isStaff() && isValidId(tokenId);
+    }
+
+    // ENROLLMENTS: Event Registrations & Server-Time Verified Check-In
+    match /enrollments/{enrollmentId} {
+      allow get: if isSignedIn() && isValidId(enrollmentId) && (
+        resource == null ||
+        isStaff() ||
+        enrollmentId.matches(request.auth.uid + '_.*') ||
+        enrollmentId.matches('enr_' + request.auth.uid + '_.*') ||
+        existing().userId == request.auth.uid ||
+        (
+          existing().get('teamId', null) != null &&
+          exists(/databases/$(database)/documents/teams/$(existing().teamId)) &&
+          get(/databases/$(database)/documents/teams/$(existing().teamId)).data.members.hasAny([request.auth.uid])
+        )
+      );
+
+      allow list: if isSignedIn() && (
+        isStaff() ||
+        (resource != null && existing().userId == request.auth.uid) ||
+        (hasVerifiedEmail() && resource != null && existing().userId == ('provisioned_' + request.auth.token.email.lower()))
+      );
+
+      allow create: if isValidId(enrollmentId) && isValidEnrollmentPayload(incoming(), enrollmentId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          incoming().updatedBy == 'system_merge' &&
+          incoming().userId == request.auth.uid &&
+          isMergingProvisionedUser('provisioned_' + request.auth.token.email.lower())
+        ) ||
+        (
+          isSignedIn() &&
+          incoming().attended == false &&
+          incoming().status == 'confirmed' &&
+          exists(/databases/$(database)/documents/events/$(incoming().eventId)) &&
+          get(/databases/$(database)/documents/events/$(incoming().eventId)).data.get('registrationLocked', false) != true &&
+          (
+            enrollmentId == (incoming().userId + '_' + incoming().eventId) ||
+            enrollmentId == ('enr_' + incoming().userId + '_' + incoming().eventId + '_' + incoming().sessionId)
+          ) &&
+          (
+            incoming().userId == request.auth.uid ||
+            (
+              incoming().get('teamId', null) != null &&
+              exists(/databases/$(database)/documents/teams/$(incoming().teamId)) &&
+              get(/databases/$(database)/documents/teams/$(incoming().teamId)).data.captainId == request.auth.uid &&
+              get(/databases/$(database)/documents/teams/$(incoming().teamId)).data.members.hasAny([incoming().userId])
+            )
+          )
+        )
+      );
+
+      allow update: if isValidId(enrollmentId) && isValidEnrollmentPayload(incoming(), enrollmentId) && (
+        isStaff() ||
+        (
+          isSignedIn() && (
+            // 1. Check-in requiring existing attended == false, unlocked event, and active Staff-issued checkin_token
+            (
+              existing().get('attended', false) == false &&
+              incoming().attended == true &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['attended', 'checkInAt', 'checkInTokenUsed', 'updatedAt', 'updatedBy', 'updatedByName']) &&
+              incoming().checkInTokenUsed is string &&
+              incoming().checkInTokenUsed.size() >= 4 &&
+              incoming().checkInTokenUsed.size() <= 32 &&
+              exists(/databases/$(database)/documents/events/$(existing().eventId)) &&
+              get(/databases/$(database)/documents/events/$(existing().eventId)).data.get('registrationLocked', false) != true &&
+              exists(/databases/$(database)/documents/checkin_tokens/$(existing().eventId + '_' + existing().sessionId + '_' + incoming().checkInTokenUsed)) &&
+              get(/databases/$(database)/documents/checkin_tokens/$(existing().eventId + '_' + existing().sessionId + '_' + incoming().checkInTokenUsed)).data.validUntil >= request.time &&
+              (
+                existing().userId == request.auth.uid ||
+                (
+                  existing().get('teamId', null) != null &&
+                  exists(/databases/$(database)/documents/teams/$(existing().teamId)) &&
+                  get(/databases/$(database)/documents/teams/$(existing().teamId)).data.members.hasAny([request.auth.uid])
+                )
+              )
+            ) ||
+            // 2. Session change by student or team captain within the SAME unlocked event before check-in
+            (
+              existing().get('attended', false) == false &&
+              incoming().eventId == existing().eventId &&
+              incoming().userId == existing().userId &&
+              incoming().id == existing().id &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'sessionId', 'sessionName', 'sessionDate',
+                'sessionStartTime', 'sessionEndTime', 'eventName', 'eventLocation'
+              ]) &&
+              exists(/databases/$(database)/documents/events/$(existing().eventId)) &&
+              get(/databases/$(database)/documents/events/$(existing().eventId)).data.get('registrationLocked', false) != true &&
+              (
+                existing().userId == request.auth.uid ||
+                (
+                  existing().get('teamId', null) != null &&
+                  exists(/databases/$(database)/documents/teams/$(existing().teamId)) &&
+                  get(/databases/$(database)/documents/teams/$(existing().teamId)).data.captainId == request.auth.uid
+                )
+              )
+            )
+          )
+        )
+      );
+
+      allow delete: if isSignedIn() && isValidId(enrollmentId) && (
+        isStaff() ||
+        isMergingProvisionedUser(existing().userId) ||
+        (
+          existing().get('attended', false) == false &&
+          (
+            existing().userId == request.auth.uid ||
+            (
+              existing().get('teamId', null) != null &&
+              exists(/databases/$(database)/documents/teams/$(existing().teamId)) &&
+              get(/databases/$(database)/documents/teams/$(existing().teamId)).data.captainId == request.auth.uid
+            )
+          )
+        )
+      );
+    }
+
+    // EMAIL QUEUE
+    match /mail/{mailId} {
+      allow create: if isAdmin() && isValidId(mailId);
+    }
+
+    // NOTIFICATIONS: Staff, self, or verified team co-members
+    match /notifications/{notifId} {
+      allow get: if isSignedIn() && isValidId(notifId) && (
+        resource == null ||
+        existing().userId == request.auth.uid ||
+        isStaff() ||
+        (hasVerifiedEmail() && existing().userId == ('provisioned_' + request.auth.token.email.lower()))
+      );
+      allow list: if isSignedIn() && (
+        isStaff() ||
+        (resource != null && existing().userId == request.auth.uid) ||
+        (hasVerifiedEmail() && resource != null && existing().userId == ('provisioned_' + request.auth.token.email.lower()))
+      );
+      allow create: if isValidId(notifId) && isValidNotificationPayload(incoming()) && (
+        isStaff() ||
+        (
+          isSignedIn() && (
+            incoming().userId == request.auth.uid ||
+            (
+              incoming().get('teamId', null) != null &&
+              (
+                (
+                  exists(/databases/$(database)/documents/teams/$(incoming().teamId)) &&
+                  (
+                    get(/databases/$(database)/documents/teams/$(incoming().teamId)).data.members.hasAny([request.auth.uid]) ||
+                    get(/databases/$(database)/documents/teams/$(incoming().teamId)).data.captainId == request.auth.uid
+                  ) &&
+                  get(/databases/$(database)/documents/teams/$(incoming().teamId)).data.members.hasAny([incoming().userId])
+                ) ||
+                (
+                  existsAfter(/databases/$(database)/documents/teams/$(incoming().teamId)) &&
+                  getAfter(/databases/$(database)/documents/teams/$(incoming().teamId)).data.members.hasAny([request.auth.uid]) &&
+                  incoming().userId == getAfter(/databases/$(database)/documents/teams/$(incoming().teamId)).data.captainId
+                )
+              )
+            )
+          )
+        )
+      );
+      allow update: if isSignedIn() && isValidId(notifId) && (
+        existing().userId == request.auth.uid ||
+        isStaff() ||
+        (isMergingProvisionedUser(existing().userId) && incoming().userId == request.auth.uid)
+      );
+      allow delete: if isSignedIn() && isValidId(notifId) && (existing().userId == request.auth.uid || isStaff());
+    }
+
+    // ACCESS REQUESTS: Self-created pending queue for blocked/visitor users, read/resolved by Staff
+    match /access_requests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && (
+        request.auth.uid == requestId || isStaff()
+      );
+      allow list: if isStaff();
+      allow create, update: if isValidId(requestId) && isValidAccessRequestPayload(incoming(), requestId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          request.auth.uid == requestId &&
+          incoming().uid == request.auth.uid &&
+          incoming().status == 'pending' &&
+          !('resolvedBy' in incoming()) &&
+          !('resolvedAt' in incoming())
+        )
+      );
+      allow delete: if isStaff() && isValidId(requestId);
+    }
+
+    // FEEDBACKS
+    match /feedbacks/{feedbackId} {
+      allow get: if isSignedIn() && isValidId(feedbackId) && (
+        resource == null || existing().userId == request.auth.uid || isStaff()
+      );
+      allow list: if isSignedIn() && (
+        isStaff() ||
+        (resource != null && existing().userId == request.auth.uid) ||
+        (hasVerifiedEmail() && resource != null && existing().userId == ('provisioned_' + request.auth.token.email.lower()))
+      );
+      allow create: if isSignedIn() && isValidId(feedbackId) &&
+        incoming().userId == request.auth.uid &&
+        feedbackId == (request.auth.uid + '_' + incoming().enrollmentId) &&
+        incoming().rating is number && incoming().rating >= 1 && incoming().rating <= 5 &&
+        incoming().comment is string && incoming().comment.size() <= 2000;
+      allow update: if false;
+      allow delete: if isValidId(feedbackId) && (isAdmin() || isMergingProvisionedUser(existing().userId));
+    }
+
+    // TEAMS: Auth-required, PII-free member names
+    match /teams/{teamId} {
+      allow get: if isSignedIn() && isValidId(teamId);
+      allow list: if isSignedIn();
+
+      allow create: if isValidId(teamId) && isValidTeamPayload(incoming(), teamId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          incoming().captainId == request.auth.uid &&
+          incoming().members.size() == 1 &&
+          incoming().members.hasAll([request.auth.uid]) &&
+          exists(/databases/$(database)/documents/events/$(incoming().eventId)) &&
+          get(/databases/$(database)/documents/events/$(incoming().eventId)).data.get('registrationLocked', false) != true
+        )
+      );
+
+      allow update: if isValidId(teamId) && isValidTeamPayload(incoming(), teamId) && (
+        isStaff() ||
+        (
+          isSignedIn() && (
+            // Captain edits within same unlocked event or sibling sub-event under the same parent
+            (
+              existing().captainId == request.auth.uid &&
+              incoming().id == existing().id &&
+              exists(/databases/$(database)/documents/events/$(existing().eventId)) &&
+              get(/databases/$(database)/documents/events/$(existing().eventId)).data.get('registrationLocked', false) != true &&
+              (
+                incoming().eventId == existing().eventId ||
+                (
+                  exists(/databases/$(database)/documents/events/$(incoming().eventId)) &&
+                  get(/databases/$(database)/documents/events/$(incoming().eventId)).data.get('registrationLocked', false) != true &&
+                  get(/databases/$(database)/documents/events/$(incoming().eventId)).data.get('parentId', '') != '' &&
+                  (
+                    get(/databases/$(database)/documents/events/$(incoming().eventId)).data.parentId == get(/databases/$(database)/documents/events/$(existing().eventId)).data.get('parentId', '') ||
+                    get(/databases/$(database)/documents/events/$(incoming().eventId)).data.parentId == existing().eventId
+                  )
+                )
+              )
+            ) ||
+            // Team member deliverable submission
+            (
+              existing().members.hasAny([request.auth.uid]) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['submission'])
+            ) ||
+            // Silent Onboarding UID swap for pre-provisioned team member
+            (
+              hasVerifiedEmail() &&
+              existing().members.hasAny(['provisioned_' + request.auth.token.email.lower()]) &&
+              isMergingProvisionedUser('provisioned_' + request.auth.token.email.lower()) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['members', 'membersData', 'captainId']) &&
+              incoming().members.hasAny([request.auth.uid]) &&
+              !incoming().members.hasAny(['provisioned_' + request.auth.token.email.lower()]) &&
+              incoming().members.size() == existing().members.size()
+            ) ||
+            // Non-captain joining or leaving (strictly +/- 1 own UID)
+            (
+              incoming().diff(existing()).affectedKeys().hasAny(['members', 'membersData']) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['members', 'membersData']) &&
+              exists(/databases/$(database)/documents/events/$(existing().eventId)) &&
+              get(/databases/$(database)/documents/events/$(existing().eventId)).data.get('registrationLocked', false) != true &&
+              (
+                (
+                  incoming().members.hasAll(existing().members) &&
+                  incoming().members.size() == existing().members.size() + 1 &&
+                  incoming().members.hasAny([request.auth.uid])
+                ) ||
+                (
+                  existing().members.hasAll(incoming().members) &&
+                  incoming().members.size() == existing().members.size() - 1 &&
+                  !incoming().members.hasAny([request.auth.uid])
+                )
+              )
+            )
+          )
+        )
+      );
+
+      allow delete: if isSignedIn() && isValidId(teamId) && (
+        existing().captainId == request.auth.uid || isStaff()
+      );
+    }
+
+    // SANITIZED EVALUATION TEAMS: PII-free public exhibition roster (no email, RM, UIDs, or team join codes)
+    match /evaluation_teams/{teamId} {
+      allow get: if isValidId(teamId);
+      allow list: if true;
+      allow create: if isValidId(teamId) && isValidEvaluationTeamPayload(incoming(), teamId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          exists(/databases/$(database)/documents/teams/$(teamId)) &&
+          get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]) &&
+          incoming().eventId == get(/databases/$(database)/documents/teams/$(teamId)).data.eventId
+        )
+      );
+      allow update: if isValidId(teamId) && isValidEvaluationTeamPayload(incoming(), teamId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          exists(/databases/$(database)/documents/teams/$(teamId)) &&
+          get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]) &&
+          incoming().eventId == get(/databases/$(database)/documents/teams/$(teamId)).data.eventId
+        )
+      );
+      allow delete: if isValidId(teamId) && (
+        isStaff() ||
+        (
+          isSignedIn() &&
+          exists(/databases/$(database)/documents/teams/$(teamId)) &&
+          get(/databases/$(database)/documents/teams/$(teamId)).data.captainId == request.auth.uid
+        )
+      );
+    }
+
+    // EVALUATIONS: Staff or proof-validated external judges (Magic Token or SHA-256 PIN proof) without login required
+    match /evaluations/{evaluationId} {
+      allow get: if isValidId(evaluationId) && (
+        isStaff() ||
+        resource == null ||
+        isValidJudgeEvaluationRead(existing(), evaluationId)
+      );
+      allow list: if isStaff();
+      allow create: if isValidId(evaluationId) && isValidEvaluationPayload(incoming(), evaluationId) && (
+        isStaff() ||
+        (
+          incoming().invalidated == false &&
+          isAuthorizedJudgeMutation(incoming())
+        )
+      );
+      allow update: if isValidId(evaluationId) && isValidEvaluationPayload(incoming(), evaluationId) && (
+        isStaff() ||
+        (
+          incoming().eventId == existing().eventId &&
+          incoming().teamId == existing().teamId &&
+          incoming().judgeId == existing().judgeId &&
+          incoming().invalidated == existing().invalidated &&
+          isAuthorizedJudgeMutation(incoming())
+        )
+      );
+      allow delete: if isStaff() && isValidId(evaluationId);
+    }
+
+    // TEAM FEEDBACKS: Per-team sanitized evaluation projection readable by team members when participant view is enabled
+    match /team_feedbacks/{evaluationId} {
+      allow get: if isValidId(evaluationId) && (
+        isStaff() ||
+        isTeamMemberWithVisibleFeedback(existing())
+      );
+      allow list: if isStaff() || (
+        resource != null &&
+        isTeamMemberWithVisibleFeedback(existing())
+      );
+      allow create, update: if isValidId(evaluationId) && isValidTeamFeedbackPayload(incoming(), evaluationId) && (
+        isStaff() ||
+        (
+          incoming().invalidated == false &&
+          existsAfter(/databases/$(database)/documents/evaluations/$(evaluationId)) &&
+          getAfter(/databases/$(database)/documents/evaluations/$(evaluationId)).data.eventId == incoming().eventId &&
+          getAfter(/databases/$(database)/documents/evaluations/$(evaluationId)).data.teamId == incoming().teamId &&
+          getAfter(/databases/$(database)/documents/evaluations/$(evaluationId)).data.totalScore == incoming().totalScore &&
+          getAfter(/databases/$(database)/documents/evaluations/$(evaluationId)).data.invalidated == false &&
+          isAuthorizedJudgeMutation(getAfter(/databases/$(database)/documents/evaluations/$(evaluationId)).data)
+        )
+      );
+      allow delete: if isStaff() && isValidId(evaluationId);
+    }
+
+    // JUDGE TOKENS: Direct lookup only with exact secret tokenId; listing/writing strictly Staff-only
+    match /judge_tokens/{tokenId} {
+      allow get: if isValidId(tokenId);
+      allow list: if isStaff();
+      allow create, update, delete: if isStaff() && isValidId(tokenId);
+    }
+
+    match /judge_pins/{pinId} {
+      allow get: if isStaff() && isValidId(pinId);
+      allow list: if isStaff();
+      allow write: if isStaff() && isValidId(pinId);
+    }
+
+    // EVALUATION SECRETS: Raw PIN remains strictly Staff-only
+    match /evaluation_secrets/{eventId} {
+      allow get: if isStaff() && isValidId(eventId);
+      allow list: if isStaff();
+      allow write: if isStaff() && isValidId(eventId);
+    }
+
+    // EVALUATION PIN PROOFS: Keyed by ${eventId}_${sha256(eventId::PIN)}, contains zero raw PINs; get-only by exact digest
+    match /evaluation_pin_proofs/{proofId} {
+      allow get: if isValidId(proofId);
+      allow list: if isStaff();
+      allow create, update, delete: if isStaff() && isValidId(proofId);
+    }
+
+    // OPERATIONAL STATS
+    match /operational_stats/{statId} {
+      allow get: if isStaff() && isValidId(statId);
+      allow list: if isStaff();
+      allow write: if isStaff() && isValidId(statId);
+    }
+
+    // PRESENTATION SCHEDULES: Staff-only event presentation timelines
+    match /presentation_schedules/{eventId} {
+      allow get: if isStaff() && isValidId(eventId);
+      allow list: if isStaff();
+      allow create, update: if isStaff() && isValidId(eventId) && isValidPresentationSchedulePayload(incoming(), eventId);
+      allow delete: if isStaff() && isValidId(eventId);
+    }
+
+    // AUDIT LOGS: Strictly Staff-only read & create
+    match /audit_logs/{logId} {
+      allow get: if isStaff() && isValidId(logId);
+      allow list: if isStaff();
+      allow create: if isStaff() && isValidId(logId) && isValidAuditLogPayload(incoming());
+      allow update, delete: if false;
+    }
+  }
+}
